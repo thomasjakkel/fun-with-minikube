@@ -1,0 +1,12 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: my-podinfo
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-podinfo
+  endpoints:
+    - port: http
+      path: /metrics

@@ -1,0 +1,87 @@
+# Lean victoria-metrics-k8s-stack values for the 2-node minikube cluster (2 CPU / 2.5 GB per node).
+# Persistent data lives on the `local-path` StorageClass (minikube addon storage-provisioner-rancher).
+
+victoria-metrics-operator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# Not needed for a demo; saves memory.
+alertmanager:
+  enabled: false
+vmalert:
+  enabled: false
+defaultRules:
+  enabled: false
+
+# These components listen on 127.0.0.1 in minikube and cannot be scraped.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+vmsingle:
+  spec:
+    retentionPeriod: 7d
+    storage:
+      storageClassName: local-path
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 5Gi
+    # The control plane node is already memory-constrained; also keeps the local-path volume on one node.
+    nodeSelector:
+      kubernetes.io/hostname: fun-with-minikube-m02
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+
+vmagent:
+  spec:
+    scrapeInterval: 30s
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+grafana:
+  enabled: false
+  nodeSelector:
+    kubernetes.io/hostname: fun-with-minikube-m02
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
