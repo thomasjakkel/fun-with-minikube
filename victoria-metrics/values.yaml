@@ -56,7 +56,7 @@ vmagent:
         memory: 256Mi
 
 grafana:
-  enabled: false
+  enabled: true
   nodeSelector:
     kubernetes.io/hostname: fun-with-minikube-m02
   persistence:
@@ -67,8 +67,9 @@ grafana:
     requests:
       cpu: 50m
       memory: 128Mi
+    # 256Mi gets Grafana 13 OOMKilled on startup.
     limits:
-      memory: 256Mi
+      memory: 512Mi
 
 kube-state-metrics:
   resources:

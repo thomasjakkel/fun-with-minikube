@@ -69,7 +69,17 @@ helm repo update
 
 helm install my-podinfo podinfo/podinfo \
   --kube-context fun-with-minikube \
-  --namespace demo --create-namespace
+  --namespace demo --create-namespace \
+  -f podinfo/values.yaml
+```
+
+[podinfo/values.yaml](podinfo/values.yaml) sets `logLevel: debug`. To apply it to an existing release:
+
+```bash
+helm upgrade my-podinfo podinfo/podinfo \
+  --kube-context fun-with-minikube \
+  --namespace demo \
+  -f podinfo/values.yaml
 ```
 
 Verify and access the app:
@@ -144,6 +154,35 @@ kubectl --context fun-with-minikube -n monitoring port-forward svc/vmks-grafana 
 kubectl --context fun-with-minikube -n monitoring port-forward svc/vmsingle-vmks-victoria-metrics-k8s-stack 8428:8428
 # then browse http://localhost:8428/vmui
 ```
+
+### 4. Generate traffic and observe it with PromQL
+
+[scripts/generate-traffic.sh](scripts/generate-traffic.sh) sends requests to podinfo. It uses `http://localhost:9898` (override with `PODINFO_URL`) and starts a `kubectl port-forward` itself if podinfo is not reachable there.
+
+```bash
+# scripts/generate-traffic.sh <scenario> [duration_seconds=300] [workers=4]
+scripts/generate-traffic.sh steady
+scripts/generate-traffic.sh errors 600 2
+scripts/generate-traffic.sh all 300   # all five scenarios at once
+```
+
+Run the queries in Grafana (**Explore**, VictoriaMetrics data source) or in vmui. VMAgent scrapes every 30s, so wait 1 to 2 minutes before data shows up. podinfo exposes `http_requests_total{status}` and the histogram `http_request_duration_seconds{method,path,status}`.
+
+| # | Scenario | What it does | PromQL |
+| --- | --- | --- | --- |
+| 1 | `steady` | Constant GET `/` and `/api/info` | `sum by (path) (rate(http_request_duration_seconds_count{job="my-podinfo", path!="healthz", path!="readyz", path!="metrics"}[1m]))` |
+| 2 | `errors` | ~30% `500`, ~10% `404` | `sum(rate(http_requests_total{job="my-podinfo", status=~"5.."}[5m])) / sum(rate(http_requests_total{job="my-podinfo"}[5m]))` |
+| 3 | `latency` | `/delay/0..3` seconds | `histogram_quantile(0.95, sum by (le, path) (rate(http_request_duration_seconds_bucket{job="my-podinfo"}[5m])))` |
+| 4 | `echo` | POST JSON to `/api/echo` (202) | `sum by (method, status) (rate(http_request_duration_seconds_count{job="my-podinfo", path="api_echo"}[5m]))` |
+| 5 | `burst` | No sleep, max request rate | `sum(rate(container_cpu_usage_seconds_total{namespace="demo", pod=~"my-podinfo-.*", container="podinfo"}[2m]))` |
+
+Notes:
+
+1. Requests per second per endpoint. The kubelet probes (`healthz`, `readyz`) and the scrape itself (`metrics`) are excluded.
+2. Share of 5xx responses (0.3 = 30%). Use `sum by (status) (rate(http_requests_total{job="my-podinfo"}[1m]))` to see all status codes as stacked series.
+3. 95th percentile latency per path in seconds. The `delay` path rises to several seconds, all others stay in the millisecond range.
+4. POST rate on the echo endpoint, split by method and status code.
+5. CPU cores used by the podinfo container (from cAdvisor). Also try `go_goroutines{job="my-podinfo"}` or `container_memory_working_set_bytes{namespace="demo", container="podinfo"}`.
 
 ### Troubleshooting
 
