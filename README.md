@@ -51,82 +51,103 @@ minikube status -p fun-with-minikube
 kubectl get nodes
 ```
 
-## Deploy podinfo with Helm
+## Deploy everything with Helm
 
-Minikube names the kubectl context after the profile. Make sure it is active and set `demo` as its default namespace:
+The whole setup is a single umbrella chart in [charts/](charts/), configured by one file, [charts/values.yaml](charts/values.yaml). It pulls in these charts as dependencies (versions pinned in [charts/Chart.yaml](charts/Chart.yaml) and [charts/Chart.lock](charts/Chart.lock)):
+
+| Values key | Chart | Namespace | What it is |
+| --- | --- | --- | --- |
+| `podinfo` | `podinfo/podinfo` | `demo` | Demo app (`my-podinfo`), `logLevel: debug` |
+| `vmks` | `vm/victoria-metrics-k8s-stack` | `monitoring` | Operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter |
+| `vls` | `vm/victoria-logs-single` | `monitoring` | VictoriaLogs |
+| `otel` | `open-telemetry/opentelemetry-collector` | `monitoring` | DaemonSet that ships container logs to VictoriaLogs |
+
+The chart itself adds the `demo` namespace and a `VMServiceScrape` so VMAgent scrapes podinfo's `/metrics`. The release is installed into `monitoring`; podinfo is moved to `demo` via `podinfo.namespaceOverride`. The resource names (`my-podinfo`, `vmks-*`, `vls-victoria-logs-single-server`, `otel-opentelemetry-collector-*`) are fixed via `fullnameOverride`, so they do not depend on the release name.
+
+### Quick start
+
+[scripts/up.sh](scripts/up.sh) starts the minikube cluster if needed, enables the `local-path` storage class, downloads the chart dependencies and installs or upgrades the release. Run it again after changing `charts/values.yaml`:
+
+```bash
+scripts/up.sh
+scripts/up.sh --set otel.enabled=false   # extra args are passed to helm
+```
+
+`PROFILE`, `NODES`, `CPUS`, `MEMORY`, `RELEASE` and `NAMESPACE` can be overridden as environment variables.
+
+### Manual steps
+
+Minikube names the kubectl context after the profile. Optionally make it active and set `demo` as its default namespace:
 
 ```bash
 kubectl config use-context fun-with-minikube
 kubectl config set-context fun-with-minikube --namespace demo
-kubectl config current-context
 ```
 
-Add the chart repository and install into the `demo` namespace:
-
-```bash
-helm repo add podinfo https://stefanprodan.github.io/podinfo
-helm repo update
-
-helm install my-podinfo podinfo/podinfo \
-  --kube-context fun-with-minikube \
-  --namespace demo --create-namespace \
-  -f podinfo/values.yaml
-```
-
-[podinfo/values.yaml](podinfo/values.yaml) sets `logLevel: debug`. To apply it to an existing release:
-
-```bash
-helm upgrade my-podinfo podinfo/podinfo \
-  --kube-context fun-with-minikube \
-  --namespace demo \
-  -f podinfo/values.yaml
-```
-
-Verify and access the app:
-
-```bash
-helm list -n demo --kube-context fun-with-minikube
-kubectl --context fun-with-minikube -n demo get pods,svc
-kubectl --context fun-with-minikube -n demo port-forward svc/my-podinfo 9898:9898
-# then browse http://localhost:9898
-```
-
-Uninstall (the `demo` namespace is kept unless deleted separately):
-
-```bash
-helm uninstall my-podinfo -n demo --kube-context fun-with-minikube
-kubectl --context fun-with-minikube delete namespace demo
-```
-
-## VictoriaMetrics stack with persistent storage
-
-Installs the `victoria-metrics-k8s-stack` chart (operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter) into the `monitoring` namespace and scrapes the podinfo app. The settings are in [victoria-metrics/values.yaml](victoria-metrics/values.yaml).
-
-### 1. Enable a storage class that works on multiple nodes
-
-The default `standard` class (`minikube-hostpath`) does not support multi-node clusters. The `local-path` provisioner creates the volume on the node where the pod is scheduled:
+The default `standard` StorageClass (`minikube-hostpath`) does not support multi-node clusters. The `local-path` provisioner creates the volume on the node where the pod is scheduled. Data survives `minikube stop`/`start` but not `minikube delete`.
 
 ```bash
 minikube addons enable storage-provisioner-rancher -p fun-with-minikube
 kubectl --context fun-with-minikube get sc
 ```
 
-Data survives `minikube stop`/`start` but not `minikube delete`.
-
-### 2. Install
+Add the chart repositories once (`helm dependency build` needs them), download the dependencies into `charts/charts/` (not committed) and install. The same command applies changes to an existing release:
 
 ```bash
+helm repo add podinfo https://stefanprodan.github.io/podinfo
 helm repo add vm https://victoriametrics.github.io/helm-charts/
-helm repo update
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
 
-helm install vmks vm/victoria-metrics-k8s-stack \
+helm dependency build charts/
+
+helm upgrade --install fun-with-minikube charts/ \
   --kube-context fun-with-minikube \
   --namespace monitoring --create-namespace \
-  -f victoria-metrics/values.yaml
+  --timeout 10m
 
-kubectl --context fun-with-minikube apply -f victoria-metrics/podinfo-vmservicescrape.yaml
+helm list -n monitoring --kube-context fun-with-minikube
 kubectl --context fun-with-minikube -n monitoring get pods,pvc
+kubectl --context fun-with-minikube -n demo get pods,svc
 ```
+
+To update a dependency, change its `version` in `charts/Chart.yaml` and run `helm dependency update charts/`, which also rewrites `Chart.lock`.
+
+### Configuration
+
+- Every dependency is configured under its key (`podinfo`, `vmks`, `vls`, `otel`) and can be switched off with `<key>.enabled: false`. When disabling `vmks`, also set `vls.server.vmServiceScrape.enabled: false` (its CRD comes from `vmks`).
+- `shared` holds values reused via YAML anchors: the node selector for the worker node, the StorageClass and the VictoriaLogs URL.
+- `podinfoScrape.enabled` and `podinfoNamespace.create` control the objects added by the umbrella chart.
+- Render the manifests without installing: `helm template fun-with-minikube charts/ -n monitoring`.
+
+### Access podinfo
+
+```bash
+kubectl --context fun-with-minikube -n demo port-forward svc/my-podinfo 9898:9898
+# then browse http://localhost:9898
+```
+
+### Uninstall
+
+```bash
+helm uninstall fun-with-minikube -n monitoring --kube-context fun-with-minikube
+# Some volumes (e.g. the VictoriaLogs StatefulSet PVC) are kept; delete them to drop the data
+kubectl --context fun-with-minikube -n monitoring delete pvc --all
+```
+
+### Migrating from the separate releases
+
+Earlier versions of this repository installed four releases (`my-podinfo`, `vmks`, `vls`, `otel`). Remove them before installing the umbrella chart, since it uses the same resource names and creates the `demo` namespace itself. Metrics and logs stored on the old volumes are lost.
+
+```bash
+helm uninstall my-podinfo -n demo --kube-context fun-with-minikube
+helm uninstall otel vls vmks -n monitoring --kube-context fun-with-minikube
+kubectl --context fun-with-minikube delete namespace demo
+kubectl --context fun-with-minikube -n monitoring delete pvc --all
+```
+
+## VictoriaMetrics stack with persistent storage
+
+The `vmks` part of the chart runs the `victoria-metrics-k8s-stack` (operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter) in the `monitoring` namespace and scrapes the podinfo app. Its settings are under `vmks` in [charts/values.yaml](charts/values.yaml).
 
 ### Pods in the `monitoring` namespace
 
@@ -139,11 +160,11 @@ kubectl --context fun-with-minikube -n monitoring get pods,pvc
 | `vmks-kube-state-metrics-*` | Deployment | Reads the Kubernetes API and exposes the state of objects as metrics (pod phase, restarts, replicas, PVC status, requests/limits). |
 | `vmks-victoria-metrics-k8s-stack-sync-job-*` | Job | One-time post-install job. Downloads the default Grafana dashboards and stores them as ConfigMaps. Shows `Completed`, which is expected. |
 
-Not running because they are disabled in `values.yaml`: Grafana, Alertmanager and vmalert. Set `grafana.enabled: true` to get dashboards.
+The `vmks-grafana-*` pod runs Grafana with persistent storage. Alertmanager and vmalert are disabled in `charts/values.yaml`.
 
 Besides the stack itself, kubelet/cAdvisor (per-container usage), the API server, CoreDNS and podinfo (`/metrics`) are scraped by VMAgent. They have no pod in this namespace.
 
-### 3. Access
+### Access Grafana and VictoriaMetrics
 
 ```bash
 # Grafana (user: admin)
@@ -155,7 +176,7 @@ kubectl --context fun-with-minikube -n monitoring port-forward svc/vmsingle-vmks
 # then browse http://localhost:8428/vmui
 ```
 
-### 4. Generate traffic and observe it with PromQL
+### Generate traffic and observe it with PromQL
 
 [scripts/generate-traffic.sh](scripts/generate-traffic.sh) sends requests to podinfo. It uses `http://localhost:9898` (override with `PODINFO_URL`) and starts a `kubectl port-forward` itself if podinfo is not reachable there.
 
@@ -193,8 +214,8 @@ kubectl --context fun-with-minikube -n monitoring get events --sort-by=.lastTime
 kubectl --context fun-with-minikube -n monitoring get pvc
 ```
 
-- `Pending` with `Insufficient memory`: the nodes are too small. Remove components in `values.yaml` (for example Grafana) or recreate the cluster with more `--memory`.
-- PVC `Pending`: the `local-path` StorageClass is missing, see step 1. It stays `Pending` until a pod using it is scheduled.
+- `Pending` with `Insufficient memory`: the nodes are too small. Remove components in `charts/values.yaml` (for example `vmks.grafana.enabled: false`) or recreate the cluster with more `--memory`.
+- PVC `Pending`: the `local-path` StorageClass is missing, see [Manual steps](#manual-steps). It stays `Pending` until a pod using it is scheduled.
 
 ## Logs with VictoriaLogs and the OpenTelemetry Collector
 
@@ -202,37 +223,15 @@ kubectl --context fun-with-minikube -n monitoring get pvc
 Pods -> /var/log/pods (each node) -> OTel Collector (DaemonSet) -> VictoriaLogs (:9428) -> Grafana
 ```
 
-- [victoria-logs/values.yaml](victoria-logs/values.yaml) installs VictoriaLogs standalone with the `victoria-logs-single` chart (release `vls`, 5Gi `local-path` volume, 7d retention). It also creates:
-  - a ConfigMap with the **VictoriaLogs** Grafana datasource, which the Grafana sidecar of `vmks` picks up.
+Both parts are installed with the umbrella chart (see [Deploy everything with Helm](#deploy-everything-with-helm)); their settings are in [charts/values.yaml](charts/values.yaml):
+
+- `vls` runs VictoriaLogs with the `victoria-logs-single` chart (5Gi `local-path` volume, 7d retention). It also creates:
   - a `VMServiceScrape`, so the `vmks` VMAgent scrapes VictoriaLogs' own metrics (`vl_*`) into VictoriaMetrics.
   - the **VictoriaLogs - single-node** Grafana dashboard (ingestion rate, storage, resource usage). The chart also always adds an empty **Vector K8S Monitoring** dashboard, which you can ignore.
-- [victoria-metrics/values.yaml](victoria-metrics/values.yaml) installs the `victoriametrics-logs-datasource` Grafana plugin needed by that datasource.
-- [otel-collector/values.yaml](otel-collector/values.yaml) runs the collector as a DaemonSet. It tails container logs (`logsCollection` preset), adds Kubernetes metadata (`kubernetesAttributes` preset) and sends them via OTLP/HTTP to `/insert/opentelemetry/v1/logs`.
+- `vmks.defaultDatasources.extra` adds the **VictoriaLogs** Grafana datasource, and `vmks.grafana.plugins` installs the `victoriametrics-logs-datasource` plugin it needs.
+- `otel` runs the collector as a DaemonSet. It tails container logs (`logsCollection` preset), adds Kubernetes metadata (`kubernetesAttributes` preset) and sends them via OTLP/HTTP to `/insert/opentelemetry/v1/logs`. Its collector config is set in `otel.alternateConfig` (logs pipeline only), because Helm cannot remove the chart's default traces/metrics pipelines with `null` from a parent chart.
 
-```bash
-helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-helm repo update
-
-helm install vls vm/victoria-logs-single \
-  --kube-context fun-with-minikube \
-  --namespace monitoring \
-  -f victoria-logs/values.yaml
-
-helm install otel open-telemetry/opentelemetry-collector \
-  --kube-context fun-with-minikube \
-  --namespace monitoring \
-  -f otel-collector/values.yaml
-
-# Installs the Grafana plugin
-helm upgrade vmks vm/victoria-metrics-k8s-stack \
-  --kube-context fun-with-minikube \
-  --namespace monitoring \
-  -f victoria-metrics/values.yaml
-
-kubectl --context fun-with-minikube -n monitoring get pods,pvc
-```
-
-The collector sends to `vls-victoria-logs-single-server`. If you use another release name than `vls`, update the URLs in both values files.
+The collector and the datasource use `shared.victoriaLogsUrl` (`http://vls-victoria-logs-single-server.monitoring.svc:9428`). Update it if you change `vls.fullnameOverride` or the namespace.
 
 Query the logs in Grafana (**Explore**, **VictoriaLogs**) or in the VictoriaLogs UI:
 

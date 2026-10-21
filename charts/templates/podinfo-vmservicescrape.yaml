@@ -1,0 +1,17 @@
+{{- if and .Values.podinfo.enabled .Values.vmks.enabled .Values.podinfoScrape.enabled }}
+{{- $name := include "fun-with-minikube.podinfo.fullname" . }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "fun-with-minikube.podinfo.namespace" . }}
+  labels:
+    {{- include "fun-with-minikube.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  endpoints:
+    - port: http
+      path: /metrics
+{{- end }}

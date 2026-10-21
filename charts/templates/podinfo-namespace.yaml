@@ -1,0 +1,9 @@
+{{- $ns := include "fun-with-minikube.podinfo.namespace" . }}
+{{- if and .Values.podinfo.enabled .Values.podinfoNamespace.create (ne $ns .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "fun-with-minikube.labels" . | nindent 4 }}
+{{- end }}

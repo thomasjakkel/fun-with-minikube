@@ -1,0 +1,268 @@
+# Values for the whole local setup on the 2-node minikube cluster (2 CPU / 2.5 GB per node).
+# Install with scripts/up.sh, or:
+#   helm upgrade --install fun-with-minikube charts/ -n monitoring --create-namespace --kube-context fun-with-minikube
+#
+# Everything lands in the release namespace (`monitoring`) except podinfo, which goes to `demo`.
+# The fullname/nameOverrides keep the resource names and labels of the former standalone releases
+# (my-podinfo, vmks, vls, otel), which README.md and scripts/ rely on.
+
+# kubectl context printed in the post-install notes.
+kubeContext: fun-with-minikube
+
+# Shared values, referenced below via YAML aliases.
+shared:
+  # The control plane node is memory-constrained; also keeps the local-path volumes on one node.
+  nodeSelector: &workerNodeSelector
+    kubernetes.io/hostname: fun-with-minikube-m02
+  # Needs the minikube addon storage-provisioner-rancher (the default class does not support multi-node).
+  storageClassName: &storageClassName local-path
+  victoriaLogsUrl: &victoriaLogsUrl http://vls-victoria-logs-single-server.monitoring.svc:9428
+
+# Creates podinfo's namespace (`podinfo.namespaceOverride`); Helm only creates the release namespace.
+podinfoNamespace:
+  create: true
+
+# VMServiceScrape that lets the vmks VMAgent scrape podinfo's /metrics.
+podinfoScrape:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# podinfo (demo app)
+# ---------------------------------------------------------------------------
+podinfo:
+  enabled: true
+  fullnameOverride: my-podinfo
+  namespaceOverride: demo
+  logLevel: debug
+
+# ---------------------------------------------------------------------------
+# victoria-metrics-k8s-stack: operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter
+# ---------------------------------------------------------------------------
+vmks:
+  enabled: true
+  nameOverride: victoria-metrics-k8s-stack
+  fullnameOverride: vmks-victoria-metrics-k8s-stack
+
+  victoria-metrics-operator:
+    fullnameOverride: vmks-victoria-metrics-operator
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+  # Not needed for a demo; saves memory.
+  alertmanager:
+    enabled: false
+  vmalert:
+    enabled: false
+  defaultRules:
+    enabled: false
+
+  # These components listen on 127.0.0.1 in minikube and cannot be scraped.
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+
+  vmsingle:
+    spec:
+      retentionPeriod: 7d
+      storage:
+        storageClassName: *storageClassName
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+      nodeSelector: *workerNodeSelector
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+
+  vmagent:
+    spec:
+      scrapeInterval: 30s
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+
+  defaultDatasources:
+    extra:
+      - name: VictoriaLogs
+        uid: VictoriaLogs
+        type: victoriametrics-logs-datasource
+        access: proxy
+        url: *victoriaLogsUrl
+
+  grafana:
+    enabled: true
+    fullnameOverride: vmks-grafana
+    # For the VictoriaLogs datasource in `defaultDatasources.extra`.
+    plugins:
+      - victoriametrics-logs-datasource
+    nodeSelector: *workerNodeSelector
+    persistence:
+      enabled: true
+      storageClassName: *storageClassName
+      size: 1Gi
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      # 256Mi gets Grafana 13 OOMKilled on startup.
+      limits:
+        memory: 512Mi
+
+  kube-state-metrics:
+    fullnameOverride: vmks-kube-state-metrics
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+
+  prometheus-node-exporter:
+    fullnameOverride: vmks-prometheus-node-exporter
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+
+# ---------------------------------------------------------------------------
+# victoria-logs-single: standalone VictoriaLogs, fed by the OpenTelemetry Collector
+# ---------------------------------------------------------------------------
+vls:
+  enabled: true
+  nameOverride: victoria-logs-single
+  fullnameOverride: vls-victoria-logs-single
+
+  server:
+    retentionPeriod: 7d
+    persistentVolume:
+      enabled: true
+      storageClassName: *storageClassName
+      size: 5Gi
+    nodeSelector: *workerNodeSelector
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    # Self-monitoring: the vmks VMAgent (selectAllByDefault) scrapes VictoriaLogs' /metrics.
+    # Needs the VictoriaMetrics CRDs from vmks; set to false when `vmks.enabled: false`.
+    vmServiceScrape:
+      enabled: true
+
+  # "VictoriaLogs - single-node" dashboard, loaded by the Grafana dashboard sidecar of vmks.
+  dashboards:
+    enabled: true
+    labels:
+      grafana_dashboard: "1"
+
+# ---------------------------------------------------------------------------
+# opentelemetry-collector: DaemonSet that tails container logs on every node,
+# adds Kubernetes metadata and ships them to VictoriaLogs.
+# ---------------------------------------------------------------------------
+otel:
+  enabled: true
+  nameOverride: opentelemetry-collector
+  fullnameOverride: otel-opentelemetry-collector
+
+  mode: daemonset
+
+  image:
+    repository: otel/opentelemetry-collector-k8s
+
+  presets:
+    # filelog receiver on /var/log/pods, added to the logs pipeline.
+    logsCollection:
+      enabled: true
+    # k8sattributes processor: k8s.namespace.name, k8s.pod.name, k8s.container.name, ...
+    kubernetesAttributes:
+      enabled: true
+
+  extraEnvs:
+    - name: VICTORIALOGS_URL
+      value: *victoriaLogsUrl
+
+  # Logs only. `alternateConfig` replaces the chart's default `config` (traces/metrics pipelines,
+  # jaeger/zipkin/prometheus receivers) because `null` cannot remove subchart defaults from a
+  # parent chart's values.yaml. The presets above are still injected into it.
+  alternateConfig:
+    exporters:
+      otlphttp/victorialogs:
+        logs_endpoint: ${env:VICTORIALOGS_URL}/insert/opentelemetry/v1/logs
+    extensions:
+      health_check:
+        endpoint: ${env:MY_POD_IP}:13133
+    processors:
+      batch: {}
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:MY_POD_IP}:4317
+          http:
+            endpoint: ${env:MY_POD_IP}:4318
+    service:
+      telemetry:
+        resource:
+          k8s.namespace.name: ${env:OTEL_K8S_NAMESPACE}
+          k8s.node.name: ${env:OTEL_K8S_NODE_NAME}
+          k8s.node.ip: ${env:OTEL_K8S_NODE_IP}
+          k8s.pod.name: ${env:OTEL_K8S_POD_NAME}
+          k8s.pod.ip: ${env:OTEL_K8S_POD_IP}
+          host.name: ${env:OTEL_K8S_NODE_NAME}
+        metrics:
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: ${env:MY_POD_IP}
+                    port: 8888
+      extensions:
+        - health_check
+      pipelines:
+        logs:
+          exporters:
+            - otlphttp/victorialogs
+          processors:
+            - memory_limiter
+            - batch
+          receivers:
+            - otlp
+
+  ports:
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 200Mi

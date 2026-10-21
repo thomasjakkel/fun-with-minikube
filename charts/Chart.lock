@@ -1,0 +1,15 @@
+dependencies:
+- name: podinfo
+  repository: https://stefanprodan.github.io/podinfo
+  version: 6.15.0
+- name: victoria-metrics-k8s-stack
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.96.0
+- name: victoria-logs-single
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.13.10
+- name: opentelemetry-collector
+  repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+  version: 0.176.1
+digest: sha256:84584bbf11acdcc313c931e1ba36acdaf25d3504b0f1fb6b297306f51ecc10bd
+generated: "2026-10-21T12:01:25.104331+02:00"

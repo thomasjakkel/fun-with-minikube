@@ -1,0 +1,2 @@
+# Downloaded chart dependencies (restored with `helm dependency build charts/`).
+charts/charts/*.tgz
