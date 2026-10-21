@@ -196,6 +196,59 @@ kubectl --context fun-with-minikube -n monitoring get pvc
 - `Pending` with `Insufficient memory`: the nodes are too small. Remove components in `values.yaml` (for example Grafana) or recreate the cluster with more `--memory`.
 - PVC `Pending`: the `local-path` StorageClass is missing, see step 1. It stays `Pending` until a pod using it is scheduled.
 
+## Logs with VictoriaLogs and the OpenTelemetry Collector
+
+```
+Pods -> /var/log/pods (each node) -> OTel Collector (DaemonSet) -> VictoriaLogs (:9428) -> Grafana
+```
+
+- [victoria-logs/values.yaml](victoria-logs/values.yaml) installs VictoriaLogs standalone with the `victoria-logs-single` chart (release `vls`, 5Gi `local-path` volume, 7d retention). It also creates:
+  - a ConfigMap with the **VictoriaLogs** Grafana datasource, which the Grafana sidecar of `vmks` picks up.
+  - a `VMServiceScrape`, so the `vmks` VMAgent scrapes VictoriaLogs' own metrics (`vl_*`) into VictoriaMetrics.
+  - the **VictoriaLogs - single-node** Grafana dashboard (ingestion rate, storage, resource usage). The chart also always adds an empty **Vector K8S Monitoring** dashboard, which you can ignore.
+- [victoria-metrics/values.yaml](victoria-metrics/values.yaml) installs the `victoriametrics-logs-datasource` Grafana plugin needed by that datasource.
+- [otel-collector/values.yaml](otel-collector/values.yaml) runs the collector as a DaemonSet. It tails container logs (`logsCollection` preset), adds Kubernetes metadata (`kubernetesAttributes` preset) and sends them via OTLP/HTTP to `/insert/opentelemetry/v1/logs`.
+
+```bash
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm repo update
+
+helm install vls vm/victoria-logs-single \
+  --kube-context fun-with-minikube \
+  --namespace monitoring \
+  -f victoria-logs/values.yaml
+
+helm install otel open-telemetry/opentelemetry-collector \
+  --kube-context fun-with-minikube \
+  --namespace monitoring \
+  -f otel-collector/values.yaml
+
+# Installs the Grafana plugin
+helm upgrade vmks vm/victoria-metrics-k8s-stack \
+  --kube-context fun-with-minikube \
+  --namespace monitoring \
+  -f victoria-metrics/values.yaml
+
+kubectl --context fun-with-minikube -n monitoring get pods,pvc
+```
+
+The collector sends to `vls-victoria-logs-single-server`. If you use another release name than `vls`, update the URLs in both values files.
+
+Query the logs in Grafana (**Explore**, **VictoriaLogs**) or in the VictoriaLogs UI:
+
+```bash
+kubectl --context fun-with-minikube -n monitoring port-forward svc/vls-victoria-logs-single-server 9428:9428
+# then browse http://localhost:9428/select/vmui
+```
+
+LogsQL examples (run `scripts/generate-traffic.sh errors` first):
+
+```
+k8s.namespace.name:demo
+k8s.namespace.name:demo k8s.container.name:podinfo error
+k8s.namespace.name:demo | stats by (k8s.pod.name) count() logs
+```
+
 ## Stop / restart / delete the cluster
 
 ```bash

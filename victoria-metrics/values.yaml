@@ -57,6 +57,9 @@ vmagent:
 
 grafana:
   enabled: true
+  # For the VictoriaLogs datasource provisioned by victoria-logs/values.yaml.
+  plugins:
+    - victoriametrics-logs-datasource
   nodeSelector:
     kubernetes.io/hostname: fun-with-minikube-m02
   persistence:

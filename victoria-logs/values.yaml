@@ -1,0 +1,46 @@
+# Standalone VictoriaLogs (victoria-logs-single chart), independent of the vmks release.
+# Logs are shipped by the OpenTelemetry Collector, see otel-collector/values.yaml.
+
+server:
+  retentionPeriod: 7d
+  persistentVolume:
+    enabled: true
+    storageClassName: local-path
+    size: 5Gi
+  # The control plane node is memory-constrained; also keeps the local-path volume on one node.
+  nodeSelector:
+    kubernetes.io/hostname: fun-with-minikube-m02
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Self-monitoring: the vmks VMAgent (selectAllByDefault) scrapes VictoriaLogs' /metrics.
+  vmServiceScrape:
+    enabled: true
+
+# "VictoriaLogs - single-node" dashboard, loaded by the Grafana dashboard sidecar of the vmks release.
+dashboards:
+  enabled: true
+  labels:
+    grafana_dashboard: "1"
+
+extraObjects:
+  # Picked up by the Grafana datasource sidecar of the vmks release (needs the
+  # victoriametrics-logs-datasource plugin, see victoria-metrics/values.yaml).
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: victorialogs-grafana-datasource
+      labels:
+        grafana_datasource: "1"
+    data:
+      victorialogs-datasource.yaml: |
+        apiVersion: 1
+        datasources:
+          - name: VictoriaLogs
+            uid: VictoriaLogs
+            type: victoriametrics-logs-datasource
+            access: proxy
+            url: http://vls-victoria-logs-single-server.monitoring.svc:9428
