@@ -1,0 +1,131 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vmks
+  namespace: monitoring
+spec:
+  interval: 30m
+  timeout: 10m
+  chart:
+    spec:
+      chart: victoria-metrics-k8s-stack
+      # Auto release: newest chart below 1.0.0 (Chart.yaml previously pinned 0.96.0).
+      version: ">=0.96.0 <1.0.0"
+      sourceRef:
+        kind: HelmRepository
+        name: victoriametrics
+        namespace: flux-system
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    nameOverride: victoria-metrics-k8s-stack
+    fullnameOverride: vmks-victoria-metrics-k8s-stack
+
+    victoria-metrics-operator:
+      fullnameOverride: vmks-victoria-metrics-operator
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+
+    # Not needed for a demo; saves memory.
+    alertmanager:
+      enabled: false
+    vmalert:
+      enabled: false
+    defaultRules:
+      enabled: false
+
+    # These components listen on 127.0.0.1 in minikube and cannot be scraped.
+    kubeControllerManager:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+
+    vmsingle:
+      spec:
+        retentionPeriod: 7d
+        storage:
+          # Needs the minikube addon storage-provisioner-rancher (the default class does not support multi-node).
+          storageClassName: local-path
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+        # The control plane node is memory-constrained; also keeps the local-path volumes on one node.
+        nodeSelector:
+          kubernetes.io/hostname: fun-with-minikube-m02
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+
+    vmagent:
+      spec:
+        scrapeInterval: 30s
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+
+    defaultDatasources:
+      extra:
+        - name: VictoriaLogs
+          uid: VictoriaLogs
+          type: victoriametrics-logs-datasource
+          access: proxy
+          url: http://vls-victoria-logs-single-server.monitoring.svc:9428
+
+    grafana:
+      enabled: true
+      fullnameOverride: vmks-grafana
+      # For the VictoriaLogs datasource in `defaultDatasources.extra`.
+      plugins:
+        - victoriametrics-logs-datasource
+      nodeSelector:
+        kubernetes.io/hostname: fun-with-minikube-m02
+      persistence:
+        enabled: true
+        storageClassName: local-path
+        size: 1Gi
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        # 256Mi gets Grafana 13 OOMKilled on startup.
+        limits:
+          memory: 512Mi
+
+    kube-state-metrics:
+      fullnameOverride: vmks-kube-state-metrics
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
+
+    prometheus-node-exporter:
+      fullnameOverride: vmks-prometheus-node-exporter
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi

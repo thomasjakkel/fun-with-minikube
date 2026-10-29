@@ -4,78 +4,118 @@ Demo repository for experimenting with a local multi-node Minikube cluster.
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/)
+- [Rancher Desktop](https://rancherdesktop.io/) with the `dockerd (moby)` container engine (provides the Docker socket that minikube's `docker` driver uses)
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [Helm](https://helm.sh/docs/intro/install/)
+- [Terraform](https://developer.hashicorp.com/terraform/install) (creates the cluster)
+- [Flux CLI](https://fluxcd.io/flux/installation/#install-the-flux-cli) (bootstraps GitOps)
+- A GitHub personal access token for the repository (see [Bootstrap](#bootstrap-the-cluster-with-flux))
 
 Install on macOS with [Homebrew](https://brew.sh):
 
 ```bash
-brew install --cask docker-desktop   # then start Docker Desktop once
-brew install minikube kubectl helm
+brew install --cask rancher           # then start Rancher Desktop once
+brew install minikube kubectl terraform fluxcd/tap/flux
 
-docker --version && minikube version && kubectl version --client && helm version
+docker --version && minikube version && kubectl version --client && terraform version && flux --version
 ```
 
-In Docker Desktop, give the VM at least 6 GB memory (Settings > Resources) so the two 2.5 GB nodes fit.
+Configure Rancher Desktop (Preferences):
 
-## Start the cluster
+- **Container Engine:** `dockerd (moby)`. With `containerd` there is no Docker socket and the minikube `docker` driver does not work.
+- **Kubernetes:** disable it. minikube provides the cluster, so Rancher's built-in k3s only wastes memory.
+- **Virtual Machine:** at least 6 GB memory and 4 CPUs so the two 2.5 GB nodes fit.
+
+Make sure the Docker CLI talks to Rancher Desktop (`docker context use rancher-desktop`, or `DOCKER_HOST` pointing at `~/.rd/docker.sock`) and that `docker info` works. Docker Desktop works as well if you prefer it.
+
+## Bootstrap the cluster with Flux
+
+The cluster and everything on it are created by one re-runnable script, [scripts/bootstrap.sh](scripts/bootstrap.sh):
+
+1. `terraform apply` creates the 2-node minikube cluster `fun-with-minikube` ([terraform/main.tf](terraform/main.tf): 2 CPUs and 2560 MB per node, `storage-provisioner-rancher` addon for the `local-path` StorageClass).
+2. `flux bootstrap github` installs Flux, adds [clusters/minikube/flux-system/](clusters/minikube/flux-system) to the repository and makes Flux sync this repository from then on.
+
+Before you run it:
+
+- Start Rancher Desktop (`dockerd (moby)` engine, Kubernetes disabled). `docker info` must work.
+- Push the manifests ([clusters/](clusters), [infrastructure/](infrastructure), [apps/](apps)) to the `flux` branch on GitHub. Flux only sees what is in the repository, not your working copy, and it syncs the `flux` branch (override with `BRANCH=<branch>`).
 
 ```bash
-minikube start -p fun-with-minikube --nodes 2 --driver=docker --cpus 2 --memory 2560
+git push origin flux
+
+export GITHUB_TOKEN=<github.com personal access token>
+export GITHUB_OWNER=<owner of the GitHub repo>
+scripts/bootstrap.sh              # syncs the flux branch (BRANCH=<branch> to change)
+
+git pull                          # bootstrap commits clusters/minikube/flux-system/ to the branch
 ```
 
-| Flag                   | Description                                  |
-| ---------------------- | -------------------------------------------- |
-| `-p fun-with-minikube` | Profile (cluster) name                       |
-| `--nodes 2`            | Number of nodes (1 control plane + 1 worker) |
-| `--driver=docker`      | Run nodes as Docker containers               |
-| `--cpus 2`             | CPUs per node                                |
-| `--memory 2560`        | Memory per node in MB                        |
+The script ends with `flux get kustomizations --watch`. Wait until `flux-system`, `infrastructure` and `apps` are `Ready True` (the first run takes several minutes), then stop it with `Ctrl+C`.
 
-### Minimal single-node cluster
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GITHUB_OWNER` | (required) | User or organization that owns the repository |
+| `GITHUB_TOKEN` | (required) | PAT. Fine-grained: *Administration* and *Contents* read/write on this repository |
+| `GITHUB_REPO` | `fun-with-minikube` | Repository name |
+| `BRANCH` | `flux` | Branch Flux syncs |
+| `PERSONAL` | `true` | `false` if the owner is an organization |
+| `TOKEN_AUTH` | `false` | `true` if you only have write access (no deploy key; Flux uses the PAT over HTTPS) |
+| `PROFILE` | `fun-with-minikube` | minikube profile / kubectl context |
 
-For the lowest resource usage, start a single node with the minimum values Minikube accepts (2 CPUs, 1800 MB):
+Running the script again is safe: `terraform apply` and `flux bootstrap` are idempotent. Flux only needs the token while bootstrapping; the cluster then reads the repository with a deploy key stored in the `flux-system` secret.
 
-```bash
-minikube start -p fun-with-minikube --nodes 1 --driver=docker --cpus 2 --memory 1800
-```
-
-The node count of an existing profile cannot be reduced. Delete the cluster first (`minikube delete -p fun-with-minikube`) when switching from the 2-node setup.
+Flux does not wait for you: push changes to the watched branch and it applies them (the Git poll interval is 1 minute).
 
 ## Verify
 
 ```bash
 minikube status -p fun-with-minikube
 kubectl get nodes
+flux get kustomizations   # flux-system, infrastructure, apps: READY True
+flux get helmreleases -A  # vmks, vls, otel, my-podinfo: READY True
 ```
 
-## Deploy everything with Helm
+## What Flux deploys
 
-The whole setup is a single umbrella chart in [charts/](charts/), configured by one file, [charts/values.yaml](charts/values.yaml). It pulls in these charts as dependencies (versions pinned in [charts/Chart.yaml](charts/Chart.yaml) and [charts/Chart.lock](charts/Chart.lock)):
+Everything is declared in Git and applied by Flux in this order:
 
-| Values key | Chart | Namespace | What it is |
+| Path | Flux Kustomization | Contents |
+| --- | --- | --- |
+| [clusters/minikube/](clusters/minikube) | `flux-system` (created by bootstrap) | Flux itself plus the two Kustomizations below |
+| [infrastructure/](infrastructure) | `infrastructure` | Helm repositories, the `monitoring` namespace and the monitoring HelmReleases |
+| [apps/](apps) | `apps` (after `infrastructure`) | `demo` namespace, podinfo and its `VMServiceScrape` |
+
+| HelmRelease | Chart | Namespace | What it is |
 | --- | --- | --- | --- |
-| `podinfo` | `podinfo/podinfo` | `demo` | Demo app (`my-podinfo`), `logLevel: debug` |
-| `vmks` | `vm/victoria-metrics-k8s-stack` | `monitoring` | Operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter |
-| `vls` | `vm/victoria-logs-single` | `monitoring` | VictoriaLogs |
-| `otel` | `open-telemetry/opentelemetry-collector` | `monitoring` | DaemonSet that ships container logs to VictoriaLogs |
+| `my-podinfo` | `podinfo/podinfo` (`6.x`) | `demo` | Demo app, `logLevel: debug` |
+| `vmks` | `victoria-metrics-k8s-stack` (`>=0.96.0 <1.0.0`) | `monitoring` | Operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter |
+| `vls` | `victoria-logs-single` (`>=0.13.10 <1.0.0`) | `monitoring` | VictoriaLogs (waits for `vmks`, which provides the CRDs) |
+| `otel` | `opentelemetry-collector` (`>=0.176.1 <1.0.0`) | `monitoring` | DaemonSet that ships container logs to VictoriaLogs |
 
-The chart itself adds the `demo` namespace and a `VMServiceScrape` so VMAgent scrapes podinfo's `/metrics`. The release is installed into `monitoring`; podinfo is moved to `demo` via `podinfo.namespaceOverride`. The resource names (`my-podinfo`, `vmks-*`, `vls-victoria-logs-single-server`, `otel-opentelemetry-collector-*`) are fixed via `fullnameOverride`, so they do not depend on the release name.
+The resource names (`my-podinfo`, `vmks-*`, `vls-victoria-logs-single-server`, `otel-opentelemetry-collector-*`) are fixed via `fullnameOverride` in each HelmRelease.
 
-### Quick start
+### Auto release
 
-[scripts/up.sh](scripts/up.sh) starts the minikube cluster if needed, enables the `local-path` storage class, downloads the chart dependencies and installs or upgrades the release. Run it again after changing `charts/values.yaml`:
+The chart `version` of every HelmRelease is a semver range, so Flux installs the newest matching chart on its own (checked every `interval`; the Helm repositories are refreshed hourly). The first run installs the newest version in the range, not the minimum. A failed upgrade is retried 3 times and then rolled back (`remediateLastFailure`). To stop automatic updates, pin an exact version in the HelmRelease or run `flux suspend helmrelease <name> -n <namespace>`.
+
+### Configuration
+
+- Change values in the `values:` block of the HelmRelease, commit and push. Flux applies the change.
+- To trigger it immediately: `flux reconcile kustomization infrastructure --with-source` (or `apps`).
+- Disable a component by removing it from the `kustomization.yaml` next to it (Flux prunes it). When removing `vmks`, also set `server.vmServiceScrape.enabled: false` in `vls.yaml` and drop [apps/podinfo/vmservicescrape.yaml](apps/podinfo/vmservicescrape.yaml), since the CRD comes from `vmks`.
+- Render and check the manifests locally: `kubectl kustomize infrastructure` and `kubectl kustomize apps`.
+
+### Useful commands
 
 ```bash
-scripts/up.sh
-scripts/up.sh --set otel.enabled=false   # extra args are passed to helm
+flux get all -A
+flux logs --level=error
+flux tree kustomization flux-system
+kubectl --context fun-with-minikube -n monitoring get pods,pvc
+kubectl --context fun-with-minikube -n demo get pods,svc
 ```
 
-`PROFILE`, `NODES`, `CPUS`, `MEMORY`, `RELEASE` and `NAMESPACE` can be overridden as environment variables.
-
-### Manual steps
+The default `standard` StorageClass (`minikube-hostpath`) does not support multi-node clusters, so the volumes use `local-path`. It creates the volume on the node where the pod is scheduled. Data survives `minikube stop`/`start` but not `minikube delete`.
 
 Minikube names the kubectl context after the profile. Optionally make it active and set `demo` as its default namespace:
 
@@ -83,41 +123,6 @@ Minikube names the kubectl context after the profile. Optionally make it active 
 kubectl config use-context fun-with-minikube
 kubectl config set-context fun-with-minikube --namespace demo
 ```
-
-The default `standard` StorageClass (`minikube-hostpath`) does not support multi-node clusters. The `local-path` provisioner creates the volume on the node where the pod is scheduled. Data survives `minikube stop`/`start` but not `minikube delete`.
-
-```bash
-minikube addons enable storage-provisioner-rancher -p fun-with-minikube
-kubectl --context fun-with-minikube get sc
-```
-
-Add the chart repositories once (`helm dependency build` needs them), download the dependencies into `charts/charts/` (not committed) and install. The same command applies changes to an existing release:
-
-```bash
-helm repo add podinfo https://stefanprodan.github.io/podinfo
-helm repo add vm https://victoriametrics.github.io/helm-charts/
-helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-
-helm dependency build charts/
-
-helm upgrade --install fun-with-minikube charts/ \
-  --kube-context fun-with-minikube \
-  --namespace monitoring --create-namespace \
-  --timeout 10m
-
-helm list -n monitoring --kube-context fun-with-minikube
-kubectl --context fun-with-minikube -n monitoring get pods,pvc
-kubectl --context fun-with-minikube -n demo get pods,svc
-```
-
-To update a dependency, change its `version` in `charts/Chart.yaml` and run `helm dependency update charts/`, which also rewrites `Chart.lock`.
-
-### Configuration
-
-- Every dependency is configured under its key (`podinfo`, `vmks`, `vls`, `otel`) and can be switched off with `<key>.enabled: false`. When disabling `vmks`, also set `vls.server.vmServiceScrape.enabled: false` (its CRD comes from `vmks`).
-- `shared` holds values reused via YAML anchors: the node selector for the worker node, the StorageClass and the VictoriaLogs URL.
-- `podinfoScrape.enabled` and `podinfoNamespace.create` control the objects added by the umbrella chart.
-- Render the manifests without installing: `helm template fun-with-minikube charts/ -n monitoring`.
 
 ### Access podinfo
 
@@ -129,25 +134,27 @@ kubectl --context fun-with-minikube -n demo port-forward svc/my-podinfo 9898:989
 ### Uninstall
 
 ```bash
-helm uninstall fun-with-minikube -n monitoring --kube-context fun-with-minikube
-# Some volumes (e.g. the VictoriaLogs StatefulSet PVC) are kept; delete them to drop the data
-kubectl --context fun-with-minikube -n monitoring delete pvc --all
+# Remove the workloads but keep the cluster: delete the manifests from Git (Flux prunes them), or
+flux uninstall --keep-namespace   # removes Flux; the deployed Helm releases keep running
+# Delete everything, including the volumes
+minikube delete -p fun-with-minikube
 ```
 
-### Migrating from the separate releases
+Run `scripts/bootstrap.sh` again to recreate the same state from Git.
 
-Earlier versions of this repository installed four releases (`my-podinfo`, `vmks`, `vls`, `otel`). Remove them before installing the umbrella chart, since it uses the same resource names and creates the `demo` namespace itself. Metrics and logs stored on the old volumes are lost.
+### Migrating from the Helm umbrella chart
+
+Earlier versions installed everything with `helm upgrade --install` (`scripts/up.sh`, umbrella chart in `charts/`). Remove that release before bootstrapping, since Flux creates the same resources and manages them as its own Helm releases. Metrics and logs stored on the old volumes are lost.
 
 ```bash
-helm uninstall my-podinfo -n demo --kube-context fun-with-minikube
-helm uninstall otel vls vmks -n monitoring --kube-context fun-with-minikube
+helm uninstall fun-with-minikube -n monitoring --kube-context fun-with-minikube
 kubectl --context fun-with-minikube delete namespace demo
 kubectl --context fun-with-minikube -n monitoring delete pvc --all
 ```
 
 ## VictoriaMetrics stack with persistent storage
 
-The `vmks` part of the chart runs the `victoria-metrics-k8s-stack` (operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter) in the `monitoring` namespace and scrapes the podinfo app. Its settings are under `vmks` in [charts/values.yaml](charts/values.yaml).
+The `vmks` HelmRelease runs the `victoria-metrics-k8s-stack` (operator, VMSingle, VMAgent, Grafana, kube-state-metrics, node-exporter) in the `monitoring` namespace and scrapes the podinfo app. Its settings are in [infrastructure/monitoring/vmks.yaml](infrastructure/monitoring/vmks.yaml).
 
 ### Pods in the `monitoring` namespace
 
@@ -160,7 +167,7 @@ The `vmks` part of the chart runs the `victoria-metrics-k8s-stack` (operator, VM
 | `vmks-kube-state-metrics-*` | Deployment | Reads the Kubernetes API and exposes the state of objects as metrics (pod phase, restarts, replicas, PVC status, requests/limits). |
 | `vmks-victoria-metrics-k8s-stack-sync-job-*` | Job | One-time post-install job. Downloads the default Grafana dashboards and stores them as ConfigMaps. Shows `Completed`, which is expected. |
 
-The `vmks-grafana-*` pod runs Grafana with persistent storage. Alertmanager and vmalert are disabled in `charts/values.yaml`.
+The `vmks-grafana-*` pod runs Grafana with persistent storage. Alertmanager and vmalert are disabled in `vmks.yaml`.
 
 Besides the stack itself, kubelet/cAdvisor (per-container usage), the API server, CoreDNS and podinfo (`/metrics`) are scraped by VMAgent. They have no pod in this namespace.
 
@@ -214,8 +221,9 @@ kubectl --context fun-with-minikube -n monitoring get events --sort-by=.lastTime
 kubectl --context fun-with-minikube -n monitoring get pvc
 ```
 
-- `Pending` with `Insufficient memory`: the nodes are too small. Remove components in `charts/values.yaml` (for example `vmks.grafana.enabled: false`) or recreate the cluster with more `--memory`.
-- PVC `Pending`: the `local-path` StorageClass is missing, see [Manual steps](#manual-steps). It stays `Pending` until a pod using it is scheduled.
+- `Pending` with `Insufficient memory`: the nodes are too small. Remove components in the HelmReleases (for example `grafana.enabled: false` in `vmks.yaml`) or recreate the cluster with more `memory` in `terraform/main.tf`.
+- PVC `Pending`: the `local-path` StorageClass is missing (`kubectl --context fun-with-minikube get sc`); check that the `storage-provisioner-rancher` addon is enabled in `terraform/main.tf`. It stays `Pending` until a pod using it is scheduled.
+- A HelmRelease is not ready: `flux get helmreleases -A` and `kubectl -n <namespace> describe helmrelease <name>`.
 
 ## Logs with VictoriaLogs and the OpenTelemetry Collector
 
@@ -223,15 +231,15 @@ kubectl --context fun-with-minikube -n monitoring get pvc
 Pods -> /var/log/pods (each node) -> OTel Collector (DaemonSet) -> VictoriaLogs (:9428) -> Grafana
 ```
 
-Both parts are installed with the umbrella chart (see [Deploy everything with Helm](#deploy-everything-with-helm)); their settings are in [charts/values.yaml](charts/values.yaml):
+Both parts are deployed by Flux (see [What Flux deploys](#what-flux-deploys)); their settings are in [infrastructure/monitoring/vls.yaml](infrastructure/monitoring/vls.yaml), [infrastructure/monitoring/otel.yaml](infrastructure/monitoring/otel.yaml) and [infrastructure/monitoring/vmks.yaml](infrastructure/monitoring/vmks.yaml):
 
 - `vls` runs VictoriaLogs with the `victoria-logs-single` chart (5Gi `local-path` volume, 7d retention). It also creates:
   - a `VMServiceScrape`, so the `vmks` VMAgent scrapes VictoriaLogs' own metrics (`vl_*`) into VictoriaMetrics.
   - the **VictoriaLogs - single-node** Grafana dashboard (ingestion rate, storage, resource usage). The chart also always adds an empty **Vector K8S Monitoring** dashboard, which you can ignore.
-- `vmks.defaultDatasources.extra` adds the **VictoriaLogs** Grafana datasource, and `vmks.grafana.plugins` installs the `victoriametrics-logs-datasource` plugin it needs.
-- `otel` runs the collector as a DaemonSet. It tails container logs (`logsCollection` preset), adds Kubernetes metadata (`kubernetesAttributes` preset) and sends them via OTLP/HTTP to `/insert/opentelemetry/v1/logs`. Its collector config is set in `otel.alternateConfig` (logs pipeline only), because Helm cannot remove the chart's default traces/metrics pipelines with `null` from a parent chart.
+- `vmks.yaml` adds the **VictoriaLogs** Grafana datasource (`defaultDatasources.extra`) and installs the `victoriametrics-logs-datasource` plugin it needs (`grafana.plugins`).
+- `otel` runs the collector as a DaemonSet. It tails container logs (`logsCollection` preset), adds Kubernetes metadata (`kubernetesAttributes` preset) and sends them via OTLP/HTTP to `/insert/opentelemetry/v1/logs`. Its collector config is set in `alternateConfig` (logs pipeline only), which replaces the chart's default traces/metrics pipelines.
 
-The collector and the datasource use `shared.victoriaLogsUrl` (`http://vls-victoria-logs-single-server.monitoring.svc:9428`). Update it if you change `vls.fullnameOverride` or the namespace.
+The collector and the datasource use `http://vls-victoria-logs-single-server.monitoring.svc:9428`. Update it in `vmks.yaml` and `otel.yaml` if you change the `vls` `fullnameOverride` or the namespace.
 
 Query the logs in Grafana (**Explore**, **VictoriaLogs**) or in the VictoriaLogs UI:
 
