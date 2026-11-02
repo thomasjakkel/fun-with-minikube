@@ -27,6 +27,14 @@ terraform -chdir="$TF_DIR" apply -input=false -auto-approve
 # The kubeconfig context is named like the minikube profile / cluster_name in terraform/main.tf.
 kubectl config get-contexts "$PROFILE" >/dev/null
 
+# minikube ships a podman CNI config with the same subnet as kindnet. Pods that start before
+# kindnet is ready (CoreDNS, local-path provisioner) attach to it and cannot talk across nodes.
+kubectl --context "$PROFILE" -n kube-system rollout status ds/kindnet --timeout=5m
+kubectl --context "$PROFILE" -n kube-system rollout restart deploy/coredns
+kubectl --context "$PROFILE" -n local-path-storage rollout restart deploy/local-path-provisioner
+kubectl --context "$PROFILE" -n kube-system rollout status deploy/coredns --timeout=5m
+kubectl --context "$PROFILE" -n local-path-storage rollout status deploy/local-path-provisioner --timeout=5m
+
 flux check --pre --context "$PROFILE"
 
 args=(

@@ -1,0 +1,5 @@
+# Terraform state contains cluster credentials; never commit it.
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log

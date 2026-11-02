@@ -23,4 +23,5 @@ spec:
       remediateLastFailure: true
   values:
     fullnameOverride: my-podinfo
+    replicaCount: 2
     logLevel: debug
