@@ -82,7 +82,7 @@ Everything is declared in Git and applied by Flux in this order:
 | Path | Flux Kustomization | Contents |
 | --- | --- | --- |
 | [clusters/minikube/](clusters/minikube) | `flux-system` (created by bootstrap) | Flux itself plus the two Kustomizations below |
-| [infrastructure/](infrastructure) | `infrastructure` | Helm repositories, the `monitoring` namespace, the monitoring HelmReleases and the Capacitor Flux UI |
+| [infrastructure/](infrastructure) | `infrastructure` | Helm repositories, the `monitoring` namespace and the monitoring HelmReleases |
 | [apps/](apps) | `apps` (after `infrastructure`) | `demo` namespace, podinfo and its `VMServiceScrape` |
 
 | HelmRelease | Chart | Namespace | What it is |
@@ -256,19 +256,22 @@ k8s.namespace.name:demo k8s.container.name:podinfo error
 k8s.namespace.name:demo | stats by (k8s.pod.name) count() logs
 ```
 
-## Flux dashboard with Capacitor
+## Flux dashboard with Capacitor Next
 
-[Capacitor](https://fluxcd.io/blog/2024/02/introducing-capacitor/) is an open-source web UI for Flux, backed by [Gimlet](https://gimlet.io). It is declared in [infrastructure/capacitor/](infrastructure/capacitor) as an `OCIRepository` (`oci://ghcr.io/gimlet-io/capacitor-manifests`, `semver: ">=0.1.0"`, checked every 12h) plus a `Kustomization` that deploys it into `flux-system`.
+[Capacitor](https://github.com/gimlet-io/capacitor) is an open-source UI for Flux, backed by [Gimlet](https://gimlet.io). The original in-cluster Capacitor (v0.4.8) is end-of-life and incompatible with Flux >= 2.7: it lists `OCIRepository` resources via the removed `source.toolkit.fluxcd.io/v1beta2` API, so the dashboard stays empty and the pod logs `could not marshal event: the server could not find the requested resource` ([gimlet-io/capacitor#408](https://github.com/gimlet-io/capacitor/issues/408)).
+
+Its successor, [Capacitor Next](https://gimlet.io/capacitor-next/docs/), is a local-first binary that uses your kubeconfig instead of running in the cluster:
 
 ```bash
-kubectl --context fun-with-minikube -n flux-system port-forward svc/capacitor 9000:9000
-# then browse http://localhost:9000
+brew install gimlet-io/capacitor/capacitor
+next --port 3333
+# a browser tab opens on http://localhost:3333
 ```
 
 Short review:
 
-- **Pros:** a quick overview of Kustomizations, HelmReleases and sources and their reconcile state. It links deployments to the Flux resource that created them, and offers logs and describe for deployments, pods and configmaps. Setup is two manifests.
-- **Cons:** it is not part of Flux and must be set up separately. The semver range auto-upgrades to new releases, so versions are not pinned. It reads Secrets and has no authentication of its own, so keep it behind `port-forward` and do not expose it with an Ingress.
+- **Pros:** a quick overview of Kustomizations, HelmReleases and sources and their reconcile state, plus a Flux resource tree, Helm history/diffing and Kustomization diffing between cluster and git state. Nothing to deploy or expose in the cluster; it respects your kubeconfig RBAC and supports multiple clusters.
+- **Cons:** it is not part of Flux and runs per-developer on the laptop rather than as a shared in-cluster dashboard (a self-hosted mode is in beta).
 - **Verdict:** a useful, lightweight addition for debugging a local GitOps setup, and it complements Grafana, which covers metrics and logs rather than Flux state.
 
 ## Stop / restart / delete the cluster
