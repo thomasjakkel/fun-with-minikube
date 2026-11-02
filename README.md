@@ -264,8 +264,8 @@ Its successor, [Capacitor Next](https://gimlet.io/capacitor-next/docs/), is a lo
 
 ```bash
 brew install gimlet-io/capacitor/capacitor
-next --port 3333
-# a browser tab opens on http://localhost:3333
+capacitor --port 3333
+# then browse http://localhost:3333
 ```
 
 Short review:
